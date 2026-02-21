@@ -1,0 +1,10 @@
+Search mode: llm (use_llm=True)
+Initializing population of 256 with random sampling from NAS-Bench-201 search space.
+Init 1/256 done, current max score -9999.0000
+Init 50/256 done, current max score 67.6951
+Init 100/256 done, current max score 73.1114
+Init 150/256 done, current max score 73.1114
+Init 200/256 done, current max score 79.1979
+Init 250/256 done, current max score 79.1979
+Initial population ready. Max score=79.1979, min score=-9999.0000. Starting evolution.
+loop_count=1000/1500, max_score=98.9160, min_score=78.2136, time=1.33h

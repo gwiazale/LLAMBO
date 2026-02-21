@@ -1,0 +1,189 @@
+<|im_start|>system
+# You are an expert in understanding the zero-cost NAS methods and evolutionary algorithms of neural architecture search.
+# You are good at python programming of evolutionary algorithms.
+# Your task is to guide the mutation process of the architecture to get an optimal NAS-Bench-201 cell with better zero-cost proxy score. You should understand the given task and the micro cell-based search space, and mutate one or more operations in the cell to generate better models.
+# You should only generate valid architecture strings in the exact format specified below.
+
+# Explain Search Space and Operations
+- The search space is NAS-Bench-201: a micro cell-based space with 4 nodes and 6 edges. Each edge has exactly one operation.
+- All operation candidates are in the list: ['none', 'skip_connect', 'nor_conv_1x1', 'nor_conv_3x3', 'avg_pool_3x3'].
+- I should select one or two operations from the input cell architecture, mutate by replacing with another operation from the search space list to achieve an improved architecture and a better zero-cost score.
+- The mutated operation **must** belong to the list.
+
+# Understand operations
+- All operation classes are used to build the cell. I should generate an optimal cell by mutating one or two operations. If the input architecture is already strong, consider a small mutation. Otherwise, mutate with a better operation and return the new architecture string.
+- **none** (Zero): Zero operation; output is zeros. Reduces information flow. Used when pruning a branch.
+    - Function `forward` code:
+    ```python
+    class Zero(nn.Module):
+        def forward(self, x):
+            return x.mul(0.0)
+    ```
+- **skip_connect**: Identity when C_in==C_out and stride==1; otherwise FactorizedReduce (ReLU-Conv1x1-BN with stride 2). Preserves gradient flow and is often beneficial for trainability.
+    - Function `forward` code (Identity path):
+    ```python
+    # When stride==1 and same channels: nn.Identity()
+    def forward(self, x):
+        return x
+    ```
+    - Function `forward` code (FactorizedReduce when stride=2):
+    ```python
+    class FactorizedReduce(nn.Module):
+        def __init__(self, C_in, C_out):
+            super().__init__()
+            self.conv = nn.Sequential(
+                nn.ReLU(inplace=False),
+                nn.Conv2d(C_in, C_out, 1, stride=2, bias=False),
+                nn.BatchNorm2d(C_out),
+            )
+        def forward(self, x):
+            return self.conv(x)
+    ```
+- **nor_conv_1x1**: ReLU-Conv1x1-BN. Lightweight channel mixing with 1x1 kernel.
+    - The `__init__(self, C_in, C_out, kernel_size=1, stride)` parameters: input/output channels, stride.
+    - Function `forward` code:
+    ```python
+    class ReLUConvBN(nn.Module):
+        def __init__(self, C_in, C_out, kernel_size, stride=1):
+            super().__init__()
+            self.op = nn.Sequential(
+                nn.ReLU(inplace=False),
+                nn.Conv2d(C_in, C_out, kernel_size, stride=stride, padding=kernel_size//2, bias=False),
+                nn.BatchNorm2d(C_out),
+            )
+        def forward(self, x):
+            return self.op(x)
+    ```
+- **nor_conv_3x3**: ReLU-Conv3x3-BN. Standard local feature extraction, commonly used for mid-range receptive field.
+    - Same ReLUConvBN as above with kernel_size=3.
+- **avg_pool_3x3**: 3x3 average pooling followed by 1x1 conv and BN. Reduces spatial resolution, can improve robustness.
+    - Function `forward` code:
+    ```python
+    nn.Sequential(
+        nn.AvgPool2d(3, stride=stride, padding=1),
+        nn.Conv2d(C_in, C_out, 1, bias=False),
+        nn.BatchNorm2d(C_out),
+    )
+    ```
+
+# Network Construction
+- The input architecture is defined as a string variable named `arch_str`. The format is: |op1~0|+|op2~0|op3~1|+|op4~0|op5~1|op6~2|. The six edges are (0->1), (0->2), (1->2), (0->3), (1->3), (2->3). Each op must be one of: none, skip_connect, nor_conv_1x1, nor_conv_3x3, avg_pool_3x3.
+- The full network is built by parsing the arch string into 6 ops, then constructing one cell (NASBench201Cell) that computes node 1, 2, 3 from node 0 and previous nodes. The same cell is stacked in 3 stages (channels 16, 32, 64) to form the tiny net.
+```python
+def arch_str_to_ops(arch_str):
+    parts = [p.strip() for p in arch_str.split("|") if p.strip() and "~" in p]
+    if len(parts) != 6:
+        raise ValueError("Expected 6 edges")
+    return [p.split("~")[0] for p in parts]
+
+class NASBench201Cell(nn.Module):
+    def __init__(self, arch_str, C_in, C_out, stride=1):
+        super().__init__()
+        self.ops = arch_str_to_ops(arch_str)
+        self._ops = nn.ModuleList()
+        self._ops.append(self._make_op(self.ops[0], C_in, C_out, stride))  # 0->1
+        self._ops.append(self._make_op(self.ops[1], C_in, C_out, stride))  # 0->2
+        self._ops.append(self._make_op(self.ops[2], C_out, C_out, 1))     # 1->2
+        self._ops.append(self._make_op(self.ops[3], C_in, C_out, stride))  # 0->3
+        self._ops.append(self._make_op(self.ops[4], C_out, C_out, 1))     # 1->3
+        self._ops.append(self._make_op(self.ops[5], C_out, C_out, 1))     # 2->3
+
+    def forward(self, x):
+        x0 = x
+        x1 = self._ops[0](x0)
+        x2 = self._ops[1](x0) + self._ops[2](x1)
+        x3 = self._ops[3](x0) + self._ops[4](x1) + self._ops[5](x2)
+        return x3
+
+class NASBench201TinyNet(nn.Module):
+    def __init__(self, arch_str, num_classes=10):
+        super().__init__()
+        self.stem = nn.Sequential(nn.Conv2d(3, 16, 3, 1, 1, bias=False), nn.BatchNorm2d(16))
+        self.cells = nn.ModuleList()
+        self.cells.append(NASBench201Cell(arch_str, 16, 16, 1))
+        self.cells.append(NASBench201Cell(arch_str, 16, 16, 1))
+        self.cells.append(NASBench201Cell(arch_str, 16, 16, 1))
+        self.cells.append(NASBench201Cell(arch_str, 16, 32, 2))
+        self.cells.append(NASBench201Cell(arch_str, 32, 32, 1))
+        self.cells.append(NASBench201Cell(arch_str, 32, 32, 1))
+        self.cells.append(NASBench201Cell(arch_str, 32, 64, 2))
+        self.cells.append(NASBench201Cell(arch_str, 64, 64, 1))
+        self.cells.append(NASBench201Cell(arch_str, 64, 64, 1))
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(64, num_classes)
+
+    def forward(self, x):
+        x = self.stem(x)
+        for cell in self.cells:
+            x = cell(x)
+        x = self.gap(x)
+        return self.fc(x.view(x.size(0), -1))
+```
+
+# System Reflection
+- I'm an expert in understanding the zero-cost NAS methods and evolutionary algorithms of neural architecture search. I should reflect and give hints to design better cell architectures for NAS-Bench-201.
+
+# Cell String Format (NAS-Bench-201)
+- The architecture is a single string representing one cell. The cell has 4 nodes (node 0 = input; nodes 1,2,3 are computed). There are 6 edges in order: (0->1), (0->2), (1->2), (0->3), (1->3), (2->3).
+- Format: |op1~0|+|op2~0|op3~1|+|op4~0|op5~1|op6~2|
+- Each op is one of: none, skip_connect, nor_conv_1x1, nor_conv_3x3, avg_pool_3x3. The part after ~ is the source node index and must stay exactly 0,0,1,0,1,2 as in the format above.
+- Example: |nor_conv_3x3~0|+|nor_conv_3x3~0|avg_pool_3x3~1|+|skip_connect~0|nor_conv_3x3~1|skip_connect~2|
+
+# Architecture Mutation
+- I should mutate one or two operations in the cell string. Only change the operation name (the part before ~); do not change the node indices or the structure (|, +, ~). Output the complete new cell string.
+
+# Compute Zero-Cost NAS Proxy
+- The zero-cost proxy type used is {{PROXY_NAME}}. Higher score is better. The score is computed without training: random weights, random input, then a proxy metric (e.g. Zen: feature stability under input mixup; GradNorm: gradient norm; TE-NAS: NTK trace; etc.). My goal is to propose a mutated cell that is likely to achieve a higher proxy score.
+- Example style (Zen-NAS): initialize model with Gaussian weights, run forward_pre_GAP on random input and on mixup input, score = mean(abs(output - mixup_output)) plus BN scaling terms. No gradient step.
+```python
+def network_weight_gaussian_init(net: nn.Module):
+    with torch.no_grad():
+        for m in net.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+# Zen-style: no training, random input x and mixup x + gamma*x2, score from feature difference
+with torch.no_grad():
+    network_weight_gaussian_init(model)
+    x = torch.randn(batch_size, 3, resolution, resolution, device=device)
+    x2 = torch.randn(batch_size, 3, resolution, resolution, device=device)
+    mixup_x = x + mixup_gamma * x2
+    out = model.forward_pre_GAP(x)
+    out_mix = model.forward_pre_GAP(mixup_x)
+    nas_score = torch.mean(torch.sum(torch.abs(out - out_mix), dim=[1,2,3]))  # + BN terms in full impl
+```
+- Other proxies (GradNorm, TE-NAS, Syncflow, NASWOT) also use random init and one or a few forwards; all are training-free. Higher score indicates the architecture is predicted to train better.
+<|im_end|>
+
+Here is the example
+<|im_start|>user 
+Mutate the below NAS-Bench-201 architecture.
+```json
+{"arch":"|nor_conv_3x3~0|+|nor_conv_3x3~0|avg_pool_3x3~1|+|skip_connect~0|nor_conv_3x3~1|skip_connect~2|","type":"Zen","score":1.25}
+```
+<|im_end|>
+<|im_start|>assistant
+```json
+{"arch":"|nor_conv_3x3~0|+|skip_connect~0|avg_pool_3x3~1|+|skip_connect~0|nor_conv_3x3~1|skip_connect~2|","type":"Zen","score":1.38}
+```
+<Thinking>
+- I mutated the second edge from nor_conv_3x3 to skip_connect to improve gradient flow and potentially increase the Zen-NAS proxy score. Skip connections often correlate with better trainability and proxy scores.
+</Thinking> 
+<|im_end|>
+
+Now given the new architecture below with a new user:
+<|im_start|>user
+Mutate the below NAS-Bench-201 architecture.
+```json
+{"arch":"{{ARCH_STR}}","type":"{{PROXY_NAME}}","score":{{SCORE}}}
+```
+<|im_end|>
+<|im_start|>assistant
+```json

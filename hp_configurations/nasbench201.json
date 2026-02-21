@@ -1,0 +1,10 @@
+{
+  "NASBench201": {
+    "lr": ["float", "log", [0.0001, 1.0]],
+    "weight_decay": ["float", "log", [1e-06, 0.1]],
+    "batch_size": ["int", "linear", [16, 256]],
+    "arch_index": ["int", "linear", [0, 15624]],
+    "scheduler": ["int", "linear", [0, 3]],
+    "optimizer": ["int", "linear", [0, 2]]
+  }
+}

@@ -1,2 +1,8 @@
-loop_count=1000/1500, max_score=101.6112, min_score=81.6797, time=0.13h
-Best arch index=11718, Zen score=101.7588
+Initializing population of 100 with random sampling from NAS-Bench-201 search space.
+Init 1/100 done, current max score -9999.0000
+Init 50/100 done, current max score 75.0118
+Init 100/100 done, current max score 78.8176
+Initial population ready. Max score=78.8176, min score=-inf. Starting evolution.
+error_code=None error_message='The server had an error while processing your request. Sorry about that!' error_param=None error_type=server_error message='OpenAI API error received' stream_error=False
+loop_count=1000/1500, max_score=101.7416, min_score=92.3139, time=0.38h
+Best arch index=11718, Zen score=101.7704

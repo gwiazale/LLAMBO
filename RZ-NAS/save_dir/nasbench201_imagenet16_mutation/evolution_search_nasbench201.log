@@ -1,0 +1,11 @@
+Search mode: mutation (use_llm=False)
+Initializing population of 256 with random sampling from NAS-Bench-201 search space.
+Init 1/256 done, current max score -9999.0000
+Init 50/256 done, current max score 66.7664
+Init 100/256 done, current max score 73.6461
+Init 150/256 done, current max score 73.6461
+Init 200/256 done, current max score 79.2726
+Init 250/256 done, current max score 79.2726
+Initial population ready. Max score=79.2726, min score=-9999.0000. Starting evolution.
+loop_count=1000/1500, max_score=85.6931, min_score=60.0451, time=0.06h
+Best arch index=11718, Zen score=98.7472

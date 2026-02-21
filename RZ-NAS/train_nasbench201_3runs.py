@@ -6,6 +6,8 @@ FLOPs, GPU cost (wall-clock time), and optional regret.
 Usage:
   python train_nasbench201_3runs.py --plainnet_struct_txt save_dir/best_structure.txt \\
     --save_dir save_dir/train_3runs --dataset cifar10 --num_classes 10
+  # ImageNet-16-120 (120 classes, 16x16):
+  python train_nasbench201_3runs.py ... --dataset ImageNet16-120 --data_dir /path/to/ImageNet16-120
   # With regret (best possible test acc on benchmark, e.g. from NAS-Bench-201):
   python train_nasbench201_3runs.py ... --best_accuracy 94.36
 """
@@ -29,8 +31,8 @@ import numpy as np
 import global_utils
 from nasbench201_net import build_nasbench201
 
-# CIFAR input size for FLOPs
-INPUT_RESOLUTION = 32
+# Input resolution per dataset (for FLOPs)
+DATASET_RESOLUTION = {"cifar10": 32, "cifar100": 32, "ImageNet16-120": 16}
 
 
 def parse_args(argv):
@@ -39,8 +41,13 @@ def parse_args(argv):
                    help="Path to best_structure.txt (NAS-Bench-201 arch string).")
     p.add_argument("--save_dir", type=str, required=True,
                    help="Directory to save checkpoints and results.")
-    p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "cifar100"])
-    p.add_argument("--num_classes", type=int, default=10)
+    p.add_argument("--dataset", type=str, default="cifar10",
+                   choices=["cifar10", "cifar100", "ImageNet16-120"],
+                   help="cifar10/cifar100 auto-download; ImageNet16-120 requires --data_dir.")
+    p.add_argument("--num_classes", type=int, default=None,
+                   help="Auto from dataset: 10 (cifar10), 100 (cifar100), 120 (ImageNet16-120).")
+    p.add_argument("--data_dir", type=str, default=None,
+                   help="Root dir for ImageNet16-120 (train/ and val/ with class subdirs). Default: TORCH_HOME/ImageNet16-120.")
     p.add_argument("--epochs", type=int, default=200,
                    help="Training epochs (benchmark uses 200).")
     p.add_argument("--batch_size", type=int, default=128)
@@ -54,6 +61,16 @@ def parse_args(argv):
     p.add_argument("--best_accuracy", type=float, default=None,
                    help="Best possible test accuracy (e.g. from NAS-Bench-201) to compute regret = best - mean_top1.")
     return p.parse_args(argv)
+
+
+def _dataset_num_classes(dataset):
+    if dataset == "cifar10":
+        return 10
+    if dataset == "cifar100":
+        return 100
+    if dataset == "ImageNet16-120":
+        return 120
+    return 10
 
 
 def get_cifar_loaders(dataset, batch_size, num_workers=4):
@@ -80,6 +97,42 @@ def get_cifar_loaders(dataset, batch_size, num_workers=4):
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     return train_loader, test_loader
+
+
+def get_imagenet16_120_loaders(data_dir, batch_size, num_workers=4):
+    """ImageNet-16-120: 120 classes, 16x16 images. Expects data_dir with train/ and val/ (or test/) and class subdirs."""
+    # Standard ImageNet normalization
+    norm = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    train_tf = T.Compose([
+        T.RandomCrop(16, padding=2),
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        norm,
+    ])
+    test_tf = T.Compose([T.ToTensor(), norm])
+
+    train_root = os.path.join(data_dir, "train")
+    val_root = os.path.join(data_dir, "val")
+    if not os.path.isdir(val_root):
+        val_root = os.path.join(data_dir, "test")
+    if not os.path.isdir(train_root):
+        raise FileNotFoundError("ImageNet16-120 train dir not found: %s (set --data_dir to dataset root)" % train_root)
+    if not os.path.isdir(val_root):
+        raise FileNotFoundError("ImageNet16-120 val/test dir not found: %s" % val_root)
+
+    train_ds = torchvision.datasets.ImageFolder(train_root, transform=train_tf)
+    test_ds = torchvision.datasets.ImageFolder(val_root, transform=test_tf)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    return train_loader, test_loader
+
+
+def get_loaders(args, num_workers=4):
+    """Return (train_loader, test_loader) for cifar10, cifar100, or ImageNet16-120."""
+    if args.dataset == "ImageNet16-120":
+        data_dir = args.data_dir or os.path.join(os.environ.get("TORCH_HOME", "./data"), "ImageNet16-120")
+        return get_imagenet16_120_loaders(data_dir, args.batch_size, num_workers=num_workers)
+    return get_cifar_loaders(args.dataset, args.batch_size, num_workers=num_workers)
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -144,18 +197,22 @@ def main(args, argv=None):
         logging.error("Empty arch string in %s", args.plainnet_struct_txt)
         return
 
+    if args.num_classes is None:
+        args.num_classes = _dataset_num_classes(args.dataset)
     global_utils.mkfilepath(args.save_dir)
-    train_loader, test_loader = get_cifar_loaders(args.dataset, args.batch_size)
+    train_loader, test_loader = get_loaders(args)
     seeds = [int(s) for s in args.seeds.replace(" ", "").split(",")][: args.num_runs]
 
+    input_resolution = DATASET_RESOLUTION.get(args.dataset, 32)
     # FLOPs and params (once per architecture)
     model_for_metrics = build_nasbench201(arch_str, num_classes=args.num_classes)
-    flops = model_for_metrics.get_FLOPs(INPUT_RESOLUTION)
+    flops = model_for_metrics.get_FLOPs(input_resolution)
     n_params = model_for_metrics.get_model_size()
     del model_for_metrics
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    logging.info("Will report at end: top-1 mean±std, test error mean±std, GPU cost (wall-clock), regret (if --best_accuracy given).")
     test_accs = []
     run_times = []
     for i, seed in enumerate(seeds):
@@ -165,9 +222,16 @@ def main(args, argv=None):
         acc, elapsed = run_one_training(arch_str, train_loader, test_loader, args, seed, run_dir, device)
         test_accs.append(acc)
         run_times.append(elapsed)
-        logging.info("Run %d seed %d best top-1 test accuracy: %.2f%%  time: %.1fs", i + 1, seed, acc, elapsed)
+        logging.info("Run %d seed %d best top-1 test accuracy: %.2f%%  test_error: %.2f%%  time: %.1fs", i + 1, seed, acc, 100.0 - acc, elapsed)
+        # Intermediate summary after each run (so you see mean±std, test error, GPU cost even if stopped early)
+        n = len(test_accs)
+        run_errs = [100.0 - a for a in test_accs]
+        m_acc, s_acc = float(np.mean(test_accs)), float(np.std(test_accs)) if n > 1 else (float(np.mean(test_accs)), 0.0)
+        m_err, s_err = float(np.mean(run_errs)), float(np.std(run_errs)) if n > 1 else (float(np.mean(run_errs)), 0.0)
+        total_time_so_far = sum(run_times)
+        logging.info("[After run %d] top-1: mean=%.2f%%, std=%.2f%%  |  test_error: mean=%.2f%%, std=%.2f%%  |  GPU_cost_total=%.1fs", n, m_acc, s_acc, m_err, s_err, total_time_so_far)
 
-    # Aggregates over 3 runs
+    # Aggregates over all runs
     mean_acc = float(np.mean(test_accs))
     std_acc = float(np.std(test_accs))
     test_errors = [100.0 - a for a in test_accs]
@@ -190,7 +254,7 @@ def main(args, argv=None):
         "Per-run top-1: %s" % [round(a, 2) for a in test_accs],
         "Per-run test error: %s" % [round(e, 2) for e in test_errors],
         "-" * 60,
-        "FLOPs (one forward, %dx%d):         %s" % (INPUT_RESOLUTION, INPUT_RESOLUTION, _format_flops(flops)),
+        "FLOPs (one forward, %dx%d):         %s" % (input_resolution, input_resolution, _format_flops(flops)),
         "Params:                             %s" % _format_params(n_params),
         "-" * 60,
         "GPU cost (wall-clock):              total = %.1f s (%.2f h)  |  per run = %.1f s" % (total_time, total_time / 3600.0, mean_time),
@@ -207,7 +271,8 @@ def main(args, argv=None):
     result_file = os.path.join(args.save_dir, "train_3runs_result.txt")
     with open(result_file, "w") as f:
         f.write(summary + "\n")
-    print(summary)
+    print(summary, flush=True)
+    logging.info("Summary also written to %s", result_file)
 
 
 def _format_flops(flops):
