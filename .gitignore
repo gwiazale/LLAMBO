@@ -2,3 +2,15 @@
 llambo/bin/*
 llambo/lib/*
 .env
+llambo/__pycache__/*
+llambo/etc/*
+llambo/include/*
+llambo/share/*
+RZ-NAS/.DS_Store
+RZ-NAS/*.pyc.vscode/
+RZ-NAS/.idea/
+RZ-NAS/.vscode/
+RZ-NAS/__pycache__/
+RZ-NAS/upload_code_to_oss.sh
+RZ-NAS/download_code_from_oss.sh
+RZ-NAS/.env
