@@ -7,11 +7,17 @@ import pandas as pd
 from aiohttp import ClientSession
 from llambo.rate_limiter import RateLimiter
 from llambo.generative_sm_utils import gen_prompt_tempates
-
-openai.api_type = os.environ["OPENAI_API_TYPE"]
-openai.api_version = os.environ["OPENAI_API_VERSION"]
-openai.api_base = os.environ["OPENAI_API_BASE"]
-openai.api_key = os.environ["OPENAI_API_KEY"]
+from dotenv import load_dotenv
+load_dotenv(".env")
+openai.api_type    = os.getenv("OPENAI_API_TYPE")
+openai.api_version = os.getenv("OPENAI_API_VERSION")
+openai.api_base    = os.getenv("OPENAI_API_BASE")
+openai.api_key     = os.getenv("OPENAI_API_KEY")
+# ENGINE             = os.getenv["OPENAI_API_ENGINE"]
+# openai.api_type = os.environ["OPENAI_API_TYPE"]
+# openai.api_version = os.environ["OPENAI_API_VERSION"]
+# openai.api_base = os.environ["OPENAI_API_BASE"]
+# openai.api_key = os.environ["OPENAI_API_KEY"]
 
 
 class LLM_GEN_SM:

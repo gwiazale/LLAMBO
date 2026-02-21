@@ -7,6 +7,13 @@ import warnings
 import random
 import pandas as pd
 import numpy as np
+import sys
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 from llambo.llambo import LLAMBO
 from bayesmark.bbox_utils import get_bayesmark_func
 from sklearn.metrics import get_scorer
@@ -116,13 +123,14 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str)
     parser.add_argument('--model', type=str)
     parser.add_argument('--num_seeds', type=int)
-    parser.add_argument('--engine', type=str) # temporary fix to run multiple in parallel
+    parser.add_argument('--engine', type=str, default=os.environ.get('OPENAI_API_ENGINE', 'gpt-4o'),
+                        help='Chat model/engine (default: OPENAI_API_ENGINE or gpt-4o)')
     parser.add_argument('--sm_mode', type=str)
 
     args = parser.parse_args()
     dataset = args.dataset
     model = args.model
-    num_seeds =args.num_seeds
+    num_seeds = args.num_seeds
     chat_engine = args.engine
     sm_mode = args.sm_mode
 

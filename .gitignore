@@ -1,0 +1,4 @@
+*.pyc
+llambo/bin/*
+llambo/lib/*
+.env

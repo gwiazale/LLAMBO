@@ -7,6 +7,7 @@ import openai
 import os
 import sys
 import json
+from dotenv import load_dotenv
 sys.path.append('exp_baselines')  # Adding a directory to the Python path for importing modules
 
 import numpy as np
@@ -228,12 +229,12 @@ def obtain_dict_init(name_init, config_space, order_list, random_state = 0, num_
 ############################################################################
 
 def chat_gpt(input_text):
-    # Set up OpenAI API parameters from environment variables
-    openai.api_type    = os.environ["OPENAI_API_TYPE"]
-    openai.api_version = os.environ["OPENAI_API_VERSION"]
-    openai.api_base    = os.environ["OPENAI_API_BASE"]
-    openai.api_key     = os.environ["OPENAI_API_KEY"]
-    ENGINE             = os.environ["OPENAI_API_ENGINE"]
+    load_dotenv(".env")
+    openai.api_type    = os.getenv("OPENAI_API_TYPE")
+    openai.api_version = os.getenv("OPENAI_API_VERSION")
+    openai.api_base    = os.getenv("OPENAI_API_BASE")
+    openai.api_key     = os.getenv("OPENAI_API_KEY")
+    ENGINE             = os.getenv("OPENAI_API_ENGINE")
 
     # Initialize the message payload with system and user roles
     message = []

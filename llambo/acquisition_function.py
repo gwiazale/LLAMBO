@@ -10,11 +10,17 @@ from aiohttp import ClientSession
 from langchain import FewShotPromptTemplate
 from langchain import PromptTemplate
 from llambo.rate_limiter import RateLimiter
-
-openai.api_type = os.environ["OPENAI_API_TYPE"]
-openai.api_version = os.environ["OPENAI_API_VERSION"]
-openai.api_base = os.environ["OPENAI_API_BASE"]
-openai.api_key = os.environ["OPENAI_API_KEY"]
+from dotenv import load_dotenv
+load_dotenv(".env")
+openai.api_type    = os.getenv("OPENAI_API_TYPE")
+openai.api_version = os.getenv("OPENAI_API_VERSION")
+openai.api_base    = os.getenv("OPENAI_API_BASE")
+openai.api_key     = os.getenv("OPENAI_API_KEY")
+ENGINE             = os.getenv("OPENAI_API_ENGINE")
+# openai.api_type = os.environ["OPENAI_API_TYPE"]
+# openai.api_version = os.environ["OPENAI_API_VERSION"]
+# openai.api_base = os.environ["OPENAI_API_BASE"]
+# openai.api_key = os.environ["OPENAI_API_KEY"]
 
 
 class LLM_ACQ:
@@ -298,15 +304,20 @@ Hyperparameter configuration:"""
                 try:
                     start_time = time.time()
                     self.rate_limiter.add_request(request_text=user_message, current_time=start_time)
-                    resp = await openai.ChatCompletion.acreate(
-                        engine=self.chat_engine,
+                    model_or_engine = self.chat_engine or ENGINE or "gpt-4o"
+                    create_kw = dict(
                         messages=message,
                         temperature=0.8,
                         max_tokens=500,
                         top_p=0.95,
                         n=self.n_gens,
-                        request_timeout=10
+                        request_timeout=10,
                     )
+                    if getattr(openai, 'api_type', None) == "azure":
+                        create_kw["engine"] = model_or_engine
+                    else:
+                        create_kw["model"] = model_or_engine
+                    resp = await openai.ChatCompletion.acreate(**create_kw)
                     self.rate_limiter.add_request(request_token_count=resp['usage']['total_tokens'], current_time=start_time)
                     break
                 except Exception as e:

@@ -9,11 +9,30 @@ from aiohttp import ClientSession
 from llambo.rate_limiter import RateLimiter
 from llambo.discriminative_sm_utils import gen_prompt_tempates
 
+from dotenv import load_dotenv
+load_dotenv(".env")
 
-openai.api_type = os.environ["OPENAI_API_TYPE"]
-openai.api_version = os.environ["OPENAI_API_VERSION"]
-openai.api_base = os.environ["OPENAI_API_BASE"]
-openai.api_key = os.environ["OPENAI_API_KEY"]
+def _env(key, default=None):
+    v = os.getenv(key) or default
+    return v.strip() if isinstance(v, str) else v
+
+_api_type = (_env("OPENAI_API_TYPE") or "open_ai").strip().lower()
+# Normalize: openai/open_ai -> open_ai for comparison
+if _api_type in ("openai", "open_ai"):
+    _api_type = "open_ai"
+openai.api_type = _api_type
+# Only send API version for Azure; omit for standard OpenAI so server uses its default (avoids "Unsupported OpenAI-Version" errors)
+openai.api_version = _env("OPENAI_API_VERSION") if _api_type == "azure" else None
+# OpenAI 0.28 builds path as /engines/{id}/chat/completions (no /v1). So base must be .../v1 for correct URL.
+_api_base = (_env("OPENAI_API_BASE") or "").rstrip("/")
+if _api_base and _api_type != "azure" and not _api_base.endswith("/v1"):
+    _api_base = _api_base + "/v1"
+openai.api_base = _api_base
+openai.api_key = _env("OPENAI_API_KEY")
+# openai.api_type = os.environ["OPENAI_API_TYPE"]
+# openai.api_version = os.environ["OPENAI_API_VERSION"]
+# openai.api_base = os.environ["OPENAI_API_BASE"]
+# openai.api_key = os.environ["OPENAI_API_KEY"]
 
 
 class LLM_DIS_SM:
@@ -58,36 +77,56 @@ class LLM_DIS_SM:
         message.append({"role": "user", "content": user_message})
 
         MAX_RETRIES = 3
+        resp = None
+
+        n_preds = int(self.n_gens/self.n_templates) if self.bootstrapping else int(self.n_gens)
+        create_kw = dict(
+            messages=message,
+            temperature=0.7,
+            max_tokens=8,
+            top_p=0.95,
+            n=max(n_preds, 3),
+            request_timeout=10
+        )
+        if getattr(openai, 'api_type', None) == 'azure':
+            create_kw['deployment_id'] = self.chat_engine
+        else:
+            # Use 'model' so the client calls POST /v1/chat/completions (current API) instead of
+            # the deprecated /v1/engines/{id}/chat/completions (avoids 404 / Invalid URL).
+            create_kw['model'] = self.chat_engine
+            openai.api_version = None
 
         async with ClientSession(trust_env=True) as session:
             openai.aiosession.set(session)
-
-            resp = None
-            n_preds = int(self.n_gens/self.n_templates) if self.bootstrapping else int(self.n_gens)
-            for retry in range(MAX_RETRIES):
+            try:
+                for retry in range(MAX_RETRIES):
+                    try:
+                        start_time = time.time()
+                        self.rate_limiter.add_request(request_text=user_message, current_time=start_time)
+                        resp = await openai.ChatCompletion.acreate(**create_kw)
+                        self.rate_limiter.add_request(request_token_count=resp['usage']['total_tokens'], current_time=time.time())
+                        break
+                    except (openai.error.APIError, openai.error.InvalidRequestError) as e:
+                        err_msg = str(e)
+                        if getattr(e, 'http_status', None) == 404 or '404' in err_msg:
+                            print('[SM] 404 from API. Check OPENAI_API_BASE and OPENAI_API_ENGINE in .env')
+                            raise
+                        if 'Invalid URL' in err_msg:
+                            print('[SM] Invalid URL. Use OPENAI_API_BASE=https://api.openai.com/v1 in .env')
+                            raise
+                        if retry == MAX_RETRIES - 1:
+                            raise
+                        print(f'[SM] RETRYING LLM REQUEST {retry+1}/{MAX_RETRIES}...')
+                    except Exception as e:
+                        print(f'[SM] RETRYING LLM REQUEST {retry+1}/{MAX_RETRIES}...')
+                        print(resp)
+                        if retry == MAX_RETRIES - 1:
+                            raise
+            finally:
                 try:
-                    start_time = time.time()
-                    self.rate_limiter.add_request(request_text=user_message, current_time=start_time)
-                    resp = await openai.ChatCompletion.acreate(
-                        engine=self.chat_engine,
-                        messages=message,
-                        temperature=0.7,
-                        max_tokens=8,
-                        top_p=0.95,
-                        n=max(n_preds, 3),            # e.g. for 5 templates, get 2 generations per template
-                        request_timeout=10
-                    )
-                    self.rate_limiter.add_request(request_token_count=resp['usage']['total_tokens'], current_time=time.time())
-                    break
-                except Exception as e:
-                    print(f'[SM] RETRYING LLM REQUEST {retry+1}/{MAX_RETRIES}...')
-                    print(resp)
-                    if retry == MAX_RETRIES-1:
-                        await openai.aiosession.get().close()
-                        raise e
+                    await openai.aiosession.get().close()
+                except Exception:
                     pass
-
-        await openai.aiosession.get().close()
 
         if resp is None:
             return None

@@ -6,9 +6,25 @@ def fit_and_predict_with_GP(hp_constraints, X_train, y_train, X_test):
     '''Return predictions on surrogate model from GP.'''
     # NOTE: X_train, X_test are hyperparameter configurations, y_train is the corresponding validation error
 
-    from smac.model.gaussian_process import GaussianProcess
+    try:
+        from smac.model.gaussian_process import GaussianProcess
+    except ImportError:
+        # Fallback for SMAC v1.x
+        from smac.epm.gaussian_process import GaussianProcess
     from ConfigSpace import ConfigurationSpace, Float, Integer
-    from smac.model.gaussian_process.kernels import ConstantKernel, MaternKernel, ProductKernel
+    try:
+        # In SMAC 1.4.0, these are often just scikit-learn kernels 
+        # that SMAC expects to be passed into its GaussianProcess wrapper
+        from sklearn.gaussian_process.kernels import ConstantKernel, Matern, Product
+        # Rename them to match what the LLAMBO code expects (Kernel vs just Name)
+        for kernel_class in [ConstantKernel, Matern, Product]:
+            if not hasattr(kernel_class, 'prior'):
+                kernel_class.prior = None
+        MaternKernel = Matern
+        ProductKernel = Product
+    except ImportError:
+        # If LLAMBO specifically needs the SMAC-wrapped versions
+        from smac.epm.gaussian_process import ConstantKernel, MaternKernel, ProductKernel
     from sklearn.preprocessing import StandardScaler
 
     X_train = X_train.copy()
@@ -45,19 +61,73 @@ def fit_and_predict_with_GP(hp_constraints, X_train, y_train, X_test):
     # length_scale = 1 since we have standardized the data, \nu=2.5 is good heuristic starting point
     kernel = ProductKernel(ConstantKernel(), MaternKernel(length_scale=1.0, nu=2.5))
 
-    if X_train.shape[0] > 10:
-        gp = GaussianProcess(cs, kernel, normalize_y=False, n_restarts=20*int(X_train.shape[0]/10), seed=0)
-    else:
-        gp = GaussianProcess(cs, kernel, normalize_y=False, seed=0)
+    # Build types and bounds from ConfigSpace (required by SMAC GaussianProcess)
+    types = []
+    bounds = []
+    for hp in cs.get_hyperparameters():
+        if hasattr(hp, 'choices'):  # Categorical
+            types.append(len(hp.choices))
+            bounds.append((0, len(hp.choices) - 1))
+        else:  # Float or Integer
+            types.append(0)
+            bounds.append((hp.lower, hp.upper))
+
+    types = np.array(types, dtype=np.int32)
+    bounds = np.array(bounds, dtype=np.float64)
+
+    # SMAC GaussianProcess uses n_opt_restarts (not n_restarts)
+    n_opt_restarts = 20 * int(X_train.shape[0] / 10) if X_train.shape[0] > 10 else 10
+    gp = GaussianProcess(
+        configspace=cs,
+        types=types,
+        bounds=bounds,
+        seed=0,
+        kernel=kernel,
+        normalize_y=False,
+        n_opt_restarts=n_opt_restarts,
+    )
     gp.train(X_train, y_train)
-    y_pred, y_std = gp.predict(X_test, covariance_type='std')
+
+    # Get predictions; SMAC GP API varies by version
+    try:
+        result = gp.predict(X_test)
+        if isinstance(result, tuple) and len(result) == 2:
+            y_pred, y_var = result
+            y_std = np.sqrt(y_var)
+        else:
+            y_pred = result
+            y_std = np.zeros_like(y_pred)
+    except TypeError:
+        try:
+            y_pred, y_var = gp.predict(X_test, return_var=True)
+            y_std = np.sqrt(y_var)
+        except TypeError:
+            y_pred, y_var = gp.predict_marginalized(X_test)
+            y_std = np.sqrt(y_var)
+
+    # Final cleanup to ensure arrays are the right shape
+    y_pred = np.array(y_pred).flatten()
+    y_std = np.array(y_std).flatten()
 
     return y_pred, y_std
 
 def fit_and_predict_with_SMAC(hp_constraints, X_train, y_train, X_test):
     '''Return predictions on surrogate model from SMAC.'''
 
-    from smac.model.random_forest import RandomForest
+    try:
+        # 1. Try SMAC v2.x path
+        from smac.model.random_forest import RandomForest
+    except ImportError:
+        try:
+            # 2. Try SMAC 1.4.x specific path (Most likely for you)
+            from smac.epm.random_forest.rf_with_instances import RandomForestWithInstances as RandomForest
+        except ImportError:
+            try:
+                # 3. Try legacy SMAC path
+                from smac.epm.rf_with_instances import RandomForestWithInstances as RandomForest
+            except ImportError:
+                # 4. Fallback: Check if it's just in the epm folder as 'random_forest'
+                from smac.epm.random_forest import RandomForest
     from ConfigSpace import ConfigurationSpace, Float, Integer
 
     config_space_dict = {}
@@ -84,14 +154,41 @@ def fit_and_predict_with_SMAC(hp_constraints, X_train, y_train, X_test):
     y_train = y_train.to_numpy()
     X_test = X_test.to_numpy()
 
-    if X_train.shape[0] < 5:
-        # for when we have <= 5 samples, to stop RF from just predicting a constant
-        rf = RandomForest(cs, seed=0, min_samples_leaf=1, min_samples_split=1)
-    else:
-        rf = RandomForest(cs, seed=0)
+    # SMAC v2 uses RandomForest(configspace, seed=...); SMAC 1.4 uses RandomForest(configspace, types, bounds, seed=...)
+    try:
+        if X_train.shape[0] < 5:
+            rf = RandomForest(cs, seed=0, min_samples_leaf=1, min_samples_split=1)
+        else:
+            rf = RandomForest(cs, seed=0)
+    except TypeError as e:
+        if 'types' in str(e) and 'bounds' in str(e):
+            # SMAC 1.4 API: need types and bounds from configspace
+            try:
+                from smac.utils.configspace import get_types as smac_get_types
+                types, bounds = smac_get_types(cs)
+            except (ImportError, AttributeError):
+                try:
+                    from smac.epm.utils import get_types as smac_get_types
+                    types, bounds = smac_get_types(cs)
+                except (ImportError, AttributeError):
+                    # Fallback: build types/bounds for Integer and Float only (unit hypercube)
+                    types, bounds = [], []
+                    for hp in cs.get_hyperparameters():
+                        types.append(0)  # continuous in normalized space
+                        bounds.append((0.0, 1.0))
+            if X_train.shape[0] < 5:
+                rf = RandomForest(cs, types, bounds, seed=0, min_samples_leaf=1, min_samples_split=1)
+            else:
+                rf = RandomForest(cs, types, bounds, seed=0)
+        else:
+            raise
 
     rf.train(X_train, y_train)
-    y_pred, y_var = rf.predict(X_test, covariance_type='diagonal')  # RF only works with diagonal, need to calculate std manually
+    try:
+        y_pred, y_var = rf.predict(X_test, covariance_type='diagonal')
+    except TypeError:
+        # SMAC 1.4 uses cov_return_type instead of covariance_type
+        y_pred, y_var = rf.predict(X_test, cov_return_type='diagonal_cov')
     y_std = np.sqrt(y_var)
 
     return y_pred, y_std

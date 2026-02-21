@@ -1,5 +1,20 @@
 import os
 import argparse
+import sys
+
+# Ensure project root is on path so local bayesmark and llambo packages are found
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# Load .env from project root first so OPENAI_API_ENGINE etc. are set before any imports use them
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+except ImportError:
+    pass
+
 import json
 import optuna
 import logging
@@ -219,14 +234,18 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str)
     parser.add_argument('--num_observed', type=int)
     parser.add_argument('--num_seeds', type=int)
-    parser.add_argument('--engine', type=str)
+    parser.add_argument('--engine', type=str, default=None,
+                        help='Chat model (e.g. gpt-4o). If omitted, uses OPENAI_API_ENGINE from .env')
 
     args = parser.parse_args()
     model = args.model
     dataset = args.dataset
     num_observed = args.num_observed
     num_seeds = args.num_seeds
-    engine = args.engine
+    engine = (args.engine or os.getenv('OPENAI_API_ENGINE') or
+              os.getenv('OPENAI_ENGINE') or os.getenv('OPENAI_CHAT_ENGINE'))
+    if not engine:
+        raise ValueError('Set OPENAI_API_ENGINE in .env (e.g. OPENAI_API_ENGINE=gpt-4o) or pass --engine')
 
     # load hyperparameter config space
     with open(f'hp_configurations/bayesmark.json', 'r') as f:
