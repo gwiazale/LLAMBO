@@ -19,5 +19,33 @@ python evolution_search.py --gpu 0 --zero_shot_score <zero-cost proxy> --search_
 
 more customized parameters setting can be found in ./scripts.
 
+### NAS-Bench-201 search space (paper setting: proxy + train 3 runs)
+
+To compare accuracy on NAS-Bench-201 as in the paper: **search with a zero-shot proxy**, then **train the best-scoring network for three runs** under the benchmark training setting and report mean ± std test accuracy.
+
+1. **Search** (fitness = proxy score; no benchmark file needed):
+   ```bash
+   python evolution_search_nasbench201.py \
+     --zero_shot_score Zen \
+     --evolution_max_iter 50000 \
+     --population_size 256 \
+     --batch_size 64 --input_image_size 32 --num_classes 10 \
+     --gpu 0 \
+     --save_dir ./save_dir/nasbench201_zen
+   ```
+   Use `--zero_shot_score` one of: `Zen`, `TE-NAS`, `Syncflow`, `GradNorm`, `NASWOT`, `Flops`, `Params`, `Random`. Output: `best_structure.txt` (NAS-Bench-201 arch string).
+
+2. **Train the best architecture 3 runs** (benchmark setting: 200 epochs, SGD, CIFAR augmentation):
+   ```bash
+   python train_nasbench201_3runs.py \
+     --plainnet_struct_txt ./save_dir/nasbench201_zen/best_structure.txt \
+     --save_dir ./save_dir/nasbench201_zen/train_3runs \
+     --dataset cifar10 --num_classes 10 \
+     --epochs 200 --batch_size 128 --gpu 0
+   ```
+   Result: `train_3runs_result.txt` with test accuracy mean ± std over 3 runs.
+
+**Optional – precomputed fitness:** If you omit `--zero_shot_score` and pass `--benchmark_path` to a downloaded `NAS-Bench-201-v1_1-096897.pth` ([NAS-Bench-201](https://github.com/D-X-Y/NAS-Bench-201)), evolution uses the benchmark’s validation/test accuracy as fitness instead of a proxy.
+
 
 
