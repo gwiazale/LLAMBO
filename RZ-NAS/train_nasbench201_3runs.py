@@ -17,13 +17,14 @@ import sys
 import argparse
 import logging
 import time
+import pickle
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchvision.transforms as T
 import numpy as np
@@ -47,7 +48,7 @@ def parse_args(argv):
     p.add_argument("--num_classes", type=int, default=None,
                    help="Auto from dataset: 10 (cifar10), 100 (cifar100), 120 (ImageNet16-120).")
     p.add_argument("--data_dir", type=str, default=None,
-                   help="Root dir for ImageNet16-120 (train/ and val/ with class subdirs). Default: TORCH_HOME/ImageNet16-120.")
+                   help="Root for ImageNet16-120: either (1) CIFAR-format dir with train_data_batch_1, val_data, or (2) ImageFolder with train/ and val/. Default: ./data/ImageNet16 or TORCH_HOME/ImageNet16-120.")
     p.add_argument("--epochs", type=int, default=200,
                    help="Training epochs (benchmark uses 200).")
     p.add_argument("--batch_size", type=int, default=128)
@@ -99,42 +100,129 @@ def get_cifar_loaders(dataset, batch_size, num_workers=4):
     return train_loader, test_loader
 
 
+class ImageNet16CIFAR(Dataset):
+    """ImageNet-16-120 in CIFAR-style pickle format: train_data_batch_1, train_data_batch_2, ..., val_data.
+    Each batch: dict with 'data' (N x 768 uint8 for 16x16x3) and 'labels' (list). Keys may be bytes in pickle."""
+    def __init__(self, data_dir, train=True, transform=None):
+        self.transform = transform
+        self.data = []
+        self.labels = []
+        if train:
+            batch_files = []
+            for i in range(1, 20):
+                p = os.path.join(data_dir, "train_data_batch_%d" % i)
+                if os.path.isfile(p):
+                    batch_files.append(p)
+            if not batch_files:
+                raise FileNotFoundError("No train_data_batch_* found in %s" % data_dir)
+            for p in sorted(batch_files):
+                with open(p, "rb") as f:
+                    d = pickle.load(f, encoding="bytes")
+                data_key = b"data" if b"data" in d else "data"
+                labels_key = b"labels" if b"labels" in d else "labels"
+                self.data.append(d[data_key])
+                self.labels.extend(d[labels_key])
+        else:
+            for name in ("val_data", "test_data"):
+                p = os.path.join(data_dir, name)
+                if os.path.isfile(p):
+                    with open(p, "rb") as f:
+                        d = pickle.load(f, encoding="bytes")
+                    data_key = b"data" if b"data" in d else "data"
+                    labels_key = b"labels" if b"labels" in d else "labels"
+                    self.data.append(d[data_key])
+                    self.labels.extend(d[labels_key])
+                    break
+            if not self.data:
+                raise FileNotFoundError("Neither val_data nor test_data found in %s" % data_dir)
+        self.data = np.vstack(self.data)  # (N, 768)
+        self.labels = np.array(self.labels, dtype=np.int64)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, i):
+        x = self.data[i].reshape(3, 16, 16).transpose(1, 2, 0)  # (16, 16, 3) HWC
+        if self.transform is not None:
+            x = self.transform(x)
+        return x, self.labels[i]
+
+
+def _has_cifar_format_imagenet16(data_dir):
+    """True if data_dir contains CIFAR-format batch files (train_data_batch_1 or train_data_batch_2, etc.)."""
+    if not data_dir or not os.path.isdir(data_dir):
+        return False
+    for name in ("train_data_batch_1", "train_data_batch_2"):
+        if os.path.isfile(os.path.join(data_dir, name)):
+            return True
+    return False
+
+
 def get_imagenet16_120_loaders(data_dir, batch_size, num_workers=4):
-    """ImageNet-16-120: 120 classes, 16x16 images. Expects data_dir with train/ and val/ (or test/) and class subdirs."""
-    # Standard ImageNet normalization
+    """ImageNet-16-120: 120 classes, 16x16 images.
+    Supports two layouts:
+    (1) CIFAR-format: data_dir contains train_data_batch_1, train_data_batch_2, ..., val_data (or test_data).
+    (2) ImageFolder: data_dir contains train/ and val/ (or test/) with class subdirs."""
     norm = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
     train_tf = T.Compose([
+        T.ToPILImage(),
         T.RandomCrop(16, padding=2),
         T.RandomHorizontalFlip(),
         T.ToTensor(),
         norm,
     ])
-    test_tf = T.Compose([T.ToTensor(), norm])
+    test_tf = T.Compose([T.ToPILImage(), T.ToTensor(), norm])
 
+    if _has_cifar_format_imagenet16(data_dir):
+        train_ds = ImageNet16CIFAR(data_dir, train=True, transform=train_tf)
+        test_ds = ImageNet16CIFAR(data_dir, train=False, transform=test_tf)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        return train_loader, test_loader
+
+    # ImageFolder layout
     train_root = os.path.join(data_dir, "train")
     val_root = os.path.join(data_dir, "val")
     if not os.path.isdir(val_root):
         val_root = os.path.join(data_dir, "test")
     if not os.path.isdir(train_root):
         raise FileNotFoundError(
-            "ImageNet16-120 train dir not found: %s\n"
-            "Download the dataset and pass its root with: --data_dir /path/to/ImageNet16-120"
-            % train_root
+            "ImageNet16-120 not found in %s: expected either (1) CIFAR-format files train_data_batch_1, val_data, "
+            "or (2) ImageFolder layout with train/ and val/ subdirs. Set --data_dir to your dataset root."
+            % data_dir
         )
     if not os.path.isdir(val_root):
         raise FileNotFoundError("ImageNet16-120 val/test dir not found: %s" % val_root)
-
-    train_ds = torchvision.datasets.ImageFolder(train_root, transform=train_tf)
-    test_ds = torchvision.datasets.ImageFolder(val_root, transform=test_tf)
+    train_tf_img = T.Compose([
+        T.RandomCrop(16, padding=2),
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        norm,
+    ])
+    test_tf_img = T.Compose([T.ToTensor(), norm])
+    train_ds = torchvision.datasets.ImageFolder(train_root, transform=train_tf_img)
+    test_ds = torchvision.datasets.ImageFolder(val_root, transform=test_tf_img)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     return train_loader, test_loader
 
 
+def _default_imagenet16_data_dir():
+    """Default root for ImageNet16-120: try RZ-NAS/data/ImageNet16 (CIFAR-format), then TORCH_HOME/ImageNet16-120."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(script_dir, "data", "ImageNet16")
+    if os.path.isdir(candidate):
+        return candidate
+    candidate = os.path.join(os.environ.get("TORCH_HOME", "./data"), "ImageNet16")
+    if os.path.isdir(candidate):
+        return candidate
+    return os.path.join(os.environ.get("TORCH_HOME", "./data"), "ImageNet16-120")
+
+
 def get_loaders(args, num_workers=4):
     """Return (train_loader, test_loader) for cifar10, cifar100, or ImageNet16-120."""
     if args.dataset == "ImageNet16-120":
-        data_dir = args.data_dir or os.path.join(os.environ.get("TORCH_HOME", "./data"), "ImageNet16-120")
+        data_dir = args.data_dir or _default_imagenet16_data_dir()
         return get_imagenet16_120_loaders(data_dir, args.batch_size, num_workers=num_workers)
     return get_cifar_loaders(args.dataset, args.batch_size, num_workers=num_workers)
 
