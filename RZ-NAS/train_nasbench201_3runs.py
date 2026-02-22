@@ -101,8 +101,8 @@ def get_cifar_loaders(dataset, batch_size, num_workers=4):
 
 
 class ImageNet16CIFAR(Dataset):
-    """ImageNet-16-120 in CIFAR-style pickle format: train_data_batch_1, train_data_batch_2, ..., val_data.
-    Each batch: dict with 'data' (N x 768 uint8 for 16x16x3) and 'labels' (list). Keys may be bytes in pickle."""
+    """ImageNet-16 in CIFAR-style pickle format: train_data_batch_1, train_data_batch_2, ..., val_data.
+    Labels are normalized to 0-based: 1..120 -> 0..119, or 0..999 kept as 0..999 (1000 classes)."""
     def __init__(self, data_dir, train=True, transform=None):
         self.transform = transform
         self.data = []
@@ -137,6 +137,18 @@ class ImageNet16CIFAR(Dataset):
                 raise FileNotFoundError("Neither val_data nor test_data found in %s" % data_dir)
         self.data = np.vstack(self.data)  # (N, 768)
         self.labels = np.array(self.labels, dtype=np.int64)
+        # Normalize to 0-based: many CIFAR-format releases use 1-based (1..120)
+        min_l, max_l = int(self.labels.min()), int(self.labels.max())
+        if min_l == 1 and max_l == 120:
+            self.labels = self.labels - 1  # 1..120 -> 0..119
+            self.num_classes = 120
+        elif min_l >= 0 and max_l <= 119:
+            self.num_classes = 120  # already 0-based ImageNet16-120
+        else:
+            # e.g. full ImageNet-16 with 1000 classes (0..999)
+            self.num_classes = int(max_l) + 1
+            if min_l < 0:
+                self.labels = np.clip(self.labels, 0, self.num_classes - 1)
 
     def __len__(self):
         return len(self.labels)
@@ -176,9 +188,11 @@ def get_imagenet16_120_loaders(data_dir, batch_size, num_workers=4):
     if _has_cifar_format_imagenet16(data_dir):
         train_ds = ImageNet16CIFAR(data_dir, train=True, transform=train_tf)
         test_ds = ImageNet16CIFAR(data_dir, train=False, transform=test_tf)
+        num_classes = getattr(train_ds, "num_classes", 120)
+        logging.info("ImageNet16 CIFAR format: inferred num_classes=%d from data", num_classes)
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
         test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        return train_loader, test_loader
+        return train_loader, test_loader, num_classes
 
     # ImageFolder layout
     train_root = os.path.join(data_dir, "train")
@@ -204,7 +218,7 @@ def get_imagenet16_120_loaders(data_dir, batch_size, num_workers=4):
     test_ds = torchvision.datasets.ImageFolder(val_root, transform=test_tf_img)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    return train_loader, test_loader
+    return train_loader, test_loader, None
 
 
 def _default_imagenet16_data_dir():
@@ -220,11 +234,15 @@ def _default_imagenet16_data_dir():
 
 
 def get_loaders(args, num_workers=4):
-    """Return (train_loader, test_loader) for cifar10, cifar100, or ImageNet16-120."""
+    """Return (train_loader, test_loader, num_classes_override). num_classes_override is set for CIFAR-format ImageNet16 so model uses data's num_classes; else None."""
     if args.dataset == "ImageNet16-120":
         data_dir = args.data_dir or _default_imagenet16_data_dir()
-        return get_imagenet16_120_loaders(data_dir, args.batch_size, num_workers=num_workers)
-    return get_cifar_loaders(args.dataset, args.batch_size, num_workers=num_workers)
+        result = get_imagenet16_120_loaders(data_dir, args.batch_size, num_workers=num_workers)
+        if len(result) == 3:
+            return result
+        return result[0], result[1], None
+    train_loader, test_loader = get_cifar_loaders(args.dataset, args.batch_size, num_workers=num_workers)
+    return train_loader, test_loader, None
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -292,7 +310,9 @@ def main(args, argv=None):
     if args.num_classes is None:
         args.num_classes = _dataset_num_classes(args.dataset)
     global_utils.mkfilepath(args.save_dir)
-    train_loader, test_loader = get_loaders(args)
+    train_loader, test_loader, num_classes_override = get_loaders(args)
+    if num_classes_override is not None:
+        args.num_classes = num_classes_override
     seeds = [int(s) for s in args.seeds.replace(" ", "").split(",")][: args.num_runs]
 
     input_resolution = DATASET_RESOLUTION.get(args.dataset, 32)

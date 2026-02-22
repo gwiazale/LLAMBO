@@ -200,11 +200,12 @@ class Nasbench201ExpRunner:
             batch_size=batch_size,
             data_dir=self.data_dir,
         )
-        train_loader, test_loader = get_loaders(loader_args, num_workers=0)
+        train_loader, test_loader, num_classes_override = get_loaders(loader_args, num_workers=0)
+        num_classes = num_classes_override if num_classes_override is not None else self.num_classes
 
         # FLOPs for this architecture (once)
         resolution = DATASET_RESOLUTION.get(self.dataset_name, 32)
-        model_for_flops = build_nasbench201(arch_str, num_classes=self.num_classes)
+        model_for_flops = build_nasbench201(arch_str, num_classes=num_classes)
         flops = model_for_flops.get_FLOPs(resolution)
         del model_for_flops
         if torch.cuda.is_available():
@@ -220,7 +221,7 @@ class Nasbench201ExpRunner:
                 arch_str=arch_str,
                 train_loader=train_loader,
                 test_loader=test_loader,
-                num_classes=self.num_classes,
+                num_classes=num_classes,
                 lr=lr,
                 weight_decay=weight_decay,
                 optimizer_index=optimizer_index,
