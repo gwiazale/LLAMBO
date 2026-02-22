@@ -30,7 +30,7 @@ import torchvision.transforms as T
 import numpy as np
 
 import global_utils
-from nasbench201_net import build_nasbench201
+from nasbench201_net import build_nasbench201, index_to_arch_str
 
 # Input resolution per dataset (for FLOPs)
 DATASET_RESOLUTION = {"cifar10": 32, "cifar100": 32, "ImageNet16-120": 16}
@@ -38,8 +38,8 @@ DATASET_RESOLUTION = {"cifar10": 32, "cifar100": 32, "ImageNet16-120": 16}
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description="Train NAS-Bench-201 arch 3 runs; report top-1, test error, FLOPs, GPU cost, regret.")
-    p.add_argument("--plainnet_struct_txt", type=str, required=True,
-                   help="Path to best_structure.txt (NAS-Bench-201 arch string).")
+    p.add_argument("--plainnet_struct_txt", type=str, default=None,
+                   help="Path to best_structure.txt (NAS-Bench-201 arch string). Required if --arch_index not set.")
     p.add_argument("--save_dir", type=str, required=True,
                    help="Directory to save checkpoints and results.")
     p.add_argument("--dataset", type=str, default="cifar10",
@@ -61,6 +61,12 @@ def parse_args(argv):
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--best_accuracy", type=float, default=None,
                    help="Best possible test accuracy (e.g. from NAS-Bench-201) to compute regret = best - mean_top1.")
+    p.add_argument("--arch_index", type=int, default=None,
+                   help="NAS-Bench-201 architecture index in [0, 15624]. If set, overrides --plainnet_struct_txt.")
+    p.add_argument("--scheduler", type=int, default=0, choices=[0, 1],
+                   help="0=CosineAnnealingLR, 1=MultiStepLR (milestones at 30%%, 60%%, 80%% of epochs).")
+    p.add_argument("--optimizer", type=int, default=0, choices=[0, 1, 2],
+                   help="0=SGD, 1=Adam, 2=AdamW.")
     return p.parse_args(argv)
 
 
@@ -274,13 +280,32 @@ def evaluate(model, loader, device):
     return 100.0 * correct / total
 
 
+def _get_optimizer(opt_index, model, args):
+    if opt_index == 0:
+        return optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    if opt_index == 1:
+        return optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if opt_index == 2:
+        return optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    raise ValueError("optimizer must be 0, 1, or 2")
+
+
+def _get_scheduler(sched_index, optimizer, epochs):
+    if sched_index == 0:
+        return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    if sched_index == 1:
+        milestones = [int(epochs * 0.3), int(epochs * 0.6), int(epochs * 0.8)]
+        return optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.2)
+    raise ValueError("scheduler must be 0 or 1")
+
+
 def run_one_training(arch_str, train_loader, test_loader, args, seed, run_dir, device):
     torch.manual_seed(seed)
     np.random.seed(seed)
     model = build_nasbench201(arch_str, num_classes=args.num_classes).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = _get_optimizer(args.optimizer, model, args)
+    scheduler = _get_scheduler(args.scheduler, optimizer, args.epochs)
 
     best_test_acc = 0.0
     t0 = time.perf_counter()
@@ -301,10 +326,19 @@ def run_one_training(arch_str, train_loader, test_loader, args, seed, run_dir, d
 
 def main(args, argv=None):
     device = torch.device("cuda:%d" % args.gpu if torch.cuda.is_available() and args.gpu >= 0 else "cpu")
-    with open(args.plainnet_struct_txt, "r") as f:
-        arch_str = f.read().strip()
+    if args.arch_index is not None:
+        arch_str = index_to_arch_str(args.arch_index)
+    elif args.plainnet_struct_txt and os.path.isfile(args.plainnet_struct_txt):
+        with open(args.plainnet_struct_txt, "r") as f:
+            arch_str = f.read().strip()
+    else:
+        logging.error(
+            "Provide either --arch_index INDEX (e.g. 10605) or --plainnet_struct_txt /path/to/arch.txt. "
+            "Example: python train_nasbench201_3runs.py --arch_index 10605 --save_dir save_dir/run1 --dataset cifar10"
+        )
+        return
     if not arch_str:
-        logging.error("Empty arch string in %s", args.plainnet_struct_txt)
+        logging.error("Empty arch string (use --arch_index or provide --plainnet_struct_txt).")
         return
 
     if args.num_classes is None:
@@ -389,7 +423,7 @@ def main(args, argv=None):
 
 def _format_flops(flops):
     if flops <= 0:
-        return "N/A (install thop for FLOPs)"
+        return "N/A (pip install thop to report FLOPs)"
     if flops >= 1e9:
         return "%.2f GFLOPs" % (flops / 1e9)
     if flops >= 1e6:
