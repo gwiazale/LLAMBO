@@ -116,7 +116,11 @@ def get_imagenet16_120_loaders(data_dir, batch_size, num_workers=4):
     if not os.path.isdir(val_root):
         val_root = os.path.join(data_dir, "test")
     if not os.path.isdir(train_root):
-        raise FileNotFoundError("ImageNet16-120 train dir not found: %s (set --data_dir to dataset root)" % train_root)
+        raise FileNotFoundError(
+            "ImageNet16-120 train dir not found: %s\n"
+            "Download the dataset and pass its root with: --data_dir /path/to/ImageNet16-120"
+            % train_root
+        )
     if not os.path.isdir(val_root):
         raise FileNotFoundError("ImageNet16-120 val/test dir not found: %s" % val_root)
 
