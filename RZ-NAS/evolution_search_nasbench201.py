@@ -182,6 +182,11 @@ def parse_cmd_options(argv):
         default=None,
         help="Path to NAS-Bench-201 LLM prompt template (default: prompt/template_nasbench201.txt).",
     )
+    parser.add_argument(
+        "--random_init_only",
+        action="store_true",
+        help="No evolution: build initial population (random sample), score with proxy/precomputed, return best. Same as --search_mode random --evolution_max_iter 0.",
+    )
     return parser.parse_known_args(argv)[0]
 
 
@@ -451,6 +456,10 @@ def _set_dataset_defaults(args):
 
 def main(args):
     _set_dataset_defaults(args)
+    if getattr(args, "random_init_only", False):
+        args.search_mode = "random"
+        args.evolution_max_iter = 0
+        logging.info("Random init only: no evolution; best structure = best of initial random population.")
     use_proxy = args.zero_shot_score is not None and args.zero_shot_score.strip() != ""
     search_mode = getattr(args, "search_mode", "llm")
     if getattr(args, "no_llm", False):
@@ -478,6 +487,7 @@ def main(args):
         api = NASBench201API(benchmark_path, verbose=False)
 
     random.seed(args.seed)
+    np.random.seed(args.seed)
     if args.gpu is not None and torch.cuda.is_available():
         torch.cuda.set_device(args.gpu)
         torch.backends.cudnn.benchmark = True
@@ -523,7 +533,10 @@ def main(args):
     min_safe = min(popu_score_list) if popu_score_list else 0
     if not np.isfinite(min_safe):
         min_safe = -9999.0
-    logging.info("Initial population ready. Max score=%.4f, min score=%.4f. Starting evolution.", max(popu_score_list), min_safe)
+    if args.evolution_max_iter == 0:
+        logging.info("Initial population ready. Max score=%.4f, min score=%.4f. No evolution (random_init_only or evolution_max_iter=0); returning best from population.", max(popu_score_list), min_safe)
+    else:
+        logging.info("Initial population ready. Max score=%.4f, min score=%.4f. Starting evolution.", max(popu_score_list), min_safe)
 
     for loop_count in range(args.evolution_max_iter):
         while len(popu_structure_list) > args.population_size:

@@ -372,8 +372,8 @@ def main(args, argv=None):
         # Intermediate summary after each run (so you see mean±std, test error, GPU cost even if stopped early)
         n = len(test_accs)
         run_errs = [100.0 - a for a in test_accs]
-        m_acc, s_acc = float(np.mean(test_accs)), float(np.std(test_accs)) if n > 1 else (float(np.mean(test_accs)), 0.0)
-        m_err, s_err = float(np.mean(run_errs)), float(np.std(run_errs)) if n > 1 else (float(np.mean(run_errs)), 0.0)
+        m_acc, s_acc = (float(np.mean(test_accs)), float(np.std(test_accs))) if n > 1 else (float(np.mean(test_accs)), 0.0)
+        m_err, s_err = (float(np.mean(run_errs)), float(np.std(run_errs))) if n > 1 else (float(np.mean(run_errs)), 0.0)
         total_time_so_far = sum(run_times)
         logging.info("[After run %d] top-1: mean=%.2f%%, std=%.2f%%  |  test_error: mean=%.2f%%, std=%.2f%%  |  GPU_cost_total=%.1fs", n, m_acc, s_acc, m_err, s_err, total_time_so_far)
 

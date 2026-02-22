@@ -101,7 +101,7 @@ class NASBench201Cell(nn.Module):
 
     def _make_op(self, op_name, C_in, C_out, stride):
         if op_name == "none":
-            return Zero()
+            return Zero(C_out, stride)
         if op_name == "skip_connect":
             return nn.Identity() if C_in == C_out and stride == 1 else FactorizedReduce(C_in, C_out)
         if op_name == "nor_conv_1x1":
@@ -125,8 +125,17 @@ class NASBench201Cell(nn.Module):
 
 
 class Zero(nn.Module):
+    """Output zeros with C_out channels (and optional stride) so downstream edges get correct shape."""
+    def __init__(self, C_out, stride=1):
+        super().__init__()
+        self.C_out = C_out
+        self.stride = stride
+
     def forward(self, x):
-        return x.mul(0.0)
+        if self.C_out == x.size(1) and self.stride == 1:
+            return x.mul(0.0)
+        out = x.new_zeros(x.size(0), self.C_out, x.size(2) // self.stride, x.size(3) // self.stride)
+        return out
 
 
 class FactorizedReduce(nn.Module):
