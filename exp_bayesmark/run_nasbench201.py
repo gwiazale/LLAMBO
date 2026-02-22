@@ -10,6 +10,9 @@ model building and data loaders; runs one short training per BO trial.
 Usage (from repo root or exp_bayesmark):
   python exp_bayesmark/run_nasbench201.py --dataset cifar10 --num_seeds 1 --sm_mode discriminative
   python exp_bayesmark/run_nasbench201.py --dataset ImageNet16-120 --data_dir /path/to/ImageNet16-120 --epochs_per_trial 12
+
+  # Warm start from prior (config + arch_index + test_accuracy) results:
+  python exp_bayesmark/run_nasbench201.py --dataset cifar10 --sm_mode discriminative --warm_start_json path/to/prior_results.json
 """
 
 import os
@@ -57,6 +60,79 @@ SCHEDULER_NAMES = ["cosine", "multistep", "exponential", "none"]
 OPTIMIZER_NAMES = ["SGD", "Adam", "AdamW"]
 
 NUM_ARCHS = 15625  # 5^6 for NAS-Bench-201
+
+# Required config keys for NAS-Bench-201 (must match hp_configurations/nasbench201.json)
+NASBENCH201_HP_KEYS = ["lr", "weight_decay", "batch_size", "arch_index", "scheduler", "optimizer"]
+
+
+def _parse_score(score_val):
+    """
+    Parse score from either a number or a string 'mean +/- std' / 'mean ± std'.
+    Returns (mean_float, std_float_or_None). Optimization uses the mean only.
+    """
+    if score_val is None:
+        return None, None
+    if isinstance(score_val, (int, float)):
+        return float(score_val), None
+    s = str(score_val).strip()
+    # Match "0.85 +/- 0.02" or "0.85 ± 0.02" or "0.85 +- 0.02"
+    for sep in ("+/-", "±", "+-"):
+        if sep in s:
+            parts = s.split(sep, 1)
+            if len(parts) == 2:
+                try:
+                    mean = float(parts[0].strip())
+                    std = float(parts[1].strip())
+                    return mean, std
+                except ValueError:
+                    break
+            break
+    # Plain number string
+    try:
+        return float(s), None
+    except ValueError:
+        raise ValueError(f"score must be a number or 'mean +/- std'; got: {score_val!r}")
+
+
+def load_initial_observations(warm_start_input):
+    """
+    Convert a dictionary of tested hyperparameters + NAS-Bench-201 arch index + test accuracy
+    into the list-of-dicts format expected by LLAMBO's initial_observations.
+
+    warm_start_input: either
+      - a list of dicts, each with keys lr, weight_decay, batch_size, arch_index, scheduler,
+        optimizer, and either 'score' or 'test_accuracy', or
+      - a path (str) to a JSON file containing such a list.
+
+    Score can be a number or a string "accuracy +/- standard deviation" (e.g. "0.85 +/- 0.02").
+    The mean is used for optimization; the std is stored as score_std when present.
+
+    Example JSON entry:
+      {"lr": 0.1, "weight_decay": 1e-5, "batch_size": 128, "arch_index": 42, "scheduler": 0, "optimizer": 0, "test_accuracy": "0.85 +/- 0.02"}
+
+    Returns a list of dicts with keys NASBENCH201_HP_KEYS + 'score' (+ optional 'score_std').
+    """
+    if isinstance(warm_start_input, str):
+        with open(warm_start_input, "r") as f:
+            warm_start_input = json.load(f)
+    if not isinstance(warm_start_input, list):
+        raise TypeError("warm_start_input must be a list of dicts or a path to a JSON file containing that list")
+    out = []
+    for i, rec in enumerate(warm_start_input):
+        if not isinstance(rec, dict):
+            raise TypeError(f"Entry {i} must be a dict; got {type(rec)}")
+        missing = [k for k in NASBENCH201_HP_KEYS if k not in rec]
+        if missing:
+            raise KeyError(f"Entry {i} missing hyperparameter keys: {missing}")
+        raw_score = rec.get("score", rec.get("test_accuracy"))
+        if raw_score is None:
+            raise KeyError(f"Entry {i} must contain 'score' or 'test_accuracy'")
+        mean_score, std_score = _parse_score(raw_score)
+        row = {**{k: rec[k] for k in NASBENCH201_HP_KEYS}, "score": mean_score}
+        if std_score is not None:
+            row["score_std"] = std_score
+        out.append(row)
+    return out
 
 
 def setup_logging(log_name):
@@ -262,6 +338,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--n_trials", type=int, default=25)
     parser.add_argument("--n_initial_samples", type=int, default=5)
+    parser.add_argument("--warm_start_json", type=str, default=None,
+                        help="Path to JSON file: list of dicts with keys lr, weight_decay, batch_size, arch_index, scheduler, optimizer, and test_accuracy (or score). Seeds BO with these prior results; no random init.")
     args = parser.parse_args()
 
     if args.sm_mode == "generative":
@@ -280,6 +358,8 @@ if __name__ == "__main__":
         "lower_is_better": False,
         "hyperparameter_constraints": hp_config["NASBench201"],
         "num_classes": _dataset_num_classes(args.dataset),
+        "dataset_type": "image",
+        "dataset_name": args.dataset,
     }
 
     save_res_dir = os.path.join(
@@ -311,6 +391,11 @@ if __name__ == "__main__":
             num_runs_per_trial=args.num_runs_per_trial,
         )
 
+        initial_observations = None
+        if args.warm_start_json:
+            initial_observations = load_initial_observations(args.warm_start_json)
+            logger.info("Warm start: loaded %d prior observations from %s", len(initial_observations), args.warm_start_json)
+
         llambo = LLAMBO(
             task_context,
             args.sm_mode,
@@ -324,6 +409,7 @@ if __name__ == "__main__":
             bbox_eval_f=benchmark.evaluate_point,
             chat_engine=args.engine,
             top_pct=top_pct,
+            initial_observations=initial_observations,
         )
         llambo.seed = seed
         configs, fvals = llambo.optimize()

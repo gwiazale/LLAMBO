@@ -1,0 +1,47 @@
+[
+  {
+    "lr": 0.1,
+    "weight_decay": 5e-4,
+    "batch_size": 128,
+    "arch_index": 11718,
+    "scheduler": 0,
+    "optimizer": 0,
+    "test_accuracy": "0.9407 +/- 0.0007"
+  },
+  {
+    "lr": 0.1,
+    "weight_decay": 1e-4,
+    "batch_size": 128,
+    "arch_index": 11718,
+    "scheduler": 0,
+    "optimizer": 0,
+    "test_accuracy": "0.9317 +/- 0.0007"
+  },
+  {
+    "lr": 0.001,
+    "weight_decay": 0.05,
+    "batch_size": 64,
+    "arch_index": 11718,
+    "scheduler": 0,
+    "optimizer": 2,
+    "test_accuracy": "0.9307 +/- 0.0028"
+  },
+  {
+    "lr": 0.2,
+    "weight_decay": 3e-4,
+    "batch_size": 256,
+    "arch_index": 11718,
+    "scheduler": 0,
+    "optimizer": 0,
+    "test_accuracy": "0.9399 +/- 0.0013"
+  },
+  {
+    "lr": 0.05,
+    "weight_decay": 5e-4,
+    "batch_size": 128,
+    "arch_index": 11718,
+    "scheduler": 1,
+    "optimizer": 0,
+    "test_accuracy": "0.9373 +/- 0.0015"
+  }
+]

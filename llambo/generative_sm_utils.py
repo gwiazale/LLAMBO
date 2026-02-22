@@ -79,12 +79,9 @@ def gen_prompt_tempates(
     # contextual information about the task
     model = task_context['model']
     task = task_context['task']
-    tot_feats = task_context['tot_feats']
-    cat_feats = task_context['cat_feats']
-    num_feats = task_context['num_feats']
-    n_classes = task_context['n_classes']
-    n_samples = task_context['num_samples']
     metric = task_context['metric']
+    dataset_type = task_context.get('dataset_type', 'tabular')
+    dataset_name = task_context.get('dataset_name', '')
 
     if metric == 'neg_mean_squared_error':
         metric = 'mean squared error'
@@ -105,13 +102,26 @@ Classification: {A}"""
         )
 
         prefix = f"The following are examples of hyperparameter configurations for a {model} and the corresponding performance classification."
-        if task == 'classification':
-            prefix += f" The model is evaluated on a tabular {task} task and the label contains {n_classes} classes."
-        elif task == 'regression':
-            prefix += f" The model is evaluated on a tabular {task} task."
+        if dataset_type == 'image':
+            ds_desc = {
+                'cifar10': 'CIFAR-10 (32x32 RGB images, 10 classes)',
+                'cifar100': 'CIFAR-100 (32x32 RGB images, 100 classes)',
+                'imagenet16-120': 'ImageNet16-120 (image classification, 120 classes)',
+            }.get((dataset_name or '').lower(), 'image classification')
+            prefix += f" The model is evaluated on {ds_desc}. Each configuration specifies a NAS-Bench-201 architecture and training hyperparameters. "
         else:
-            raise Exception
-        prefix += f" The tabular dataset contains {n_samples} samples and {tot_feats} features ({cat_feats} categorical, {num_feats} numerical). "
+            tot_feats = task_context['tot_feats']
+            cat_feats = task_context['cat_feats']
+            num_feats = task_context['num_feats']
+            n_classes = task_context['n_classes']
+            n_samples = task_context['num_samples']
+            if task == 'classification':
+                prefix += f" The model is evaluated on a tabular {task} task and the label contains {n_classes} classes."
+            elif task == 'regression':
+                prefix += f" The model is evaluated on a tabular {task} task."
+            else:
+                raise Exception
+            prefix += f" The tabular dataset contains {n_samples} samples and {tot_feats} features ({cat_feats} categorical, {num_feats} numerical). "
         prefix += f" The performance classification is 1 if the configuarion is in the best-performing {top_pct*100}% of all configurations and 0 otherwise. "
         prefix += f" Your response should only contain the predicted performance classification in the format ## performance classification ##."
 

@@ -23,7 +23,8 @@ class LLAMBO:
                  top_pct=None,      # only used for generative SM, top percentage of points to consider for generative SM
                  use_input_warping=False,       # whether to use input warping
                  prompt_setting=None,    # ablation on prompt design, either 'full_context' or 'partial_context' or 'no_context'
-                 shuffle_features=False     # whether to shuffle features in prompt generation
+                 shuffle_features=False,     # whether to shuffle features in prompt generation
+                 initial_observations=None   # optional list of dicts: each has config keys + 'score' or 'test_accuracy' (warm start, no random init)
                  ):
         self.task_context = task_context
         assert sm_mode in ['generative', 'discriminative']
@@ -45,6 +46,7 @@ class LLAMBO:
 
         self.init_f = init_f
         self.bbox_eval_f = bbox_eval_f
+        self.initial_observations = initial_observations  # list of dicts for warm start
 
         if use_input_warping:
             warping_transformer = NumericalTransformer(task_context['hyperparameter_constraints'])
@@ -83,39 +85,60 @@ class LLAMBO:
 
 
     def _initialize(self):
-        '''Initialize the optimization loop.'''
+        '''Initialize the optimization loop. Optionally seed from initial_observations (warm start).'''
         start_time = time.time()
-        # generate initial configurations
-        init_configs = self.init_f(self.n_initial_samples)
+        hp_keys = list(self.task_context['hyperparameter_constraints'].keys())
 
-        assert isinstance(init_configs, list), 'init_f() should return a list of configs (dictionaries)'
-        for item in init_configs:
-            assert isinstance(item, dict), 'init_f() should return a list of configs (dictionaries)'
+        if self.initial_observations and len(self.initial_observations) > 0:
+            # Warm start: use provided (config, test_accuracy) history; no evaluations
+            configs_list = []
+            fvals_list = []
+            for rec in self.initial_observations:
+                config = {k: rec[k] for k in hp_keys if k in rec}
+                if len(config) != len(hp_keys):
+                    raise ValueError(
+                        f'initial_observations entry must contain all hyperparameter keys {hp_keys}; got {list(config.keys())}'
+                    )
+                score = rec.get('score', rec.get('test_accuracy'))
+                if score is None:
+                    raise KeyError("initial_observations entry must contain 'score' or 'test_accuracy'")
+                configs_list.append(config)
+                fval_row = {'score': float(score)}
+                if 'score_std' in rec:
+                    fval_row['score_std'] = float(rec['score_std'])
+                fvals_list.append(fval_row)
+            self.observed_configs = pd.DataFrame(configs_list)
+            self.observed_fvals = pd.DataFrame(fvals_list)
+            print(f'[Initialization] WARM START: loaded {len(self.observed_configs)} prior observations (no new evaluations).')
+        else:
+            # Standard: random initial configurations and evaluate each
+            init_configs = self.init_f(self.n_initial_samples)
+            assert isinstance(init_configs, list), 'init_f() should return a list of configs (dictionaries)'
+            for item in init_configs:
+                assert isinstance(item, dict), 'init_f() should return a list of configs (dictionaries)'
 
-        init_configs = pd.DataFrame(init_configs)
-        assert init_configs.shape[0] == self.n_initial_samples, 'init_f() should return n_initial_samples number of configs'
+            init_configs = pd.DataFrame(init_configs)
+            assert init_configs.shape[0] == self.n_initial_samples, 'init_f() should return n_initial_samples number of configs'
 
-        # create empty pandas dataframe for observed function values
-        self.observed_fvals = pd.DataFrame()
-        self.observed_configs = pd.DataFrame()
+            self.observed_fvals = pd.DataFrame()
+            self.observed_configs = pd.DataFrame()
 
-        for index, _ in init_configs.iterrows():
-            one_config = init_configs.iloc[[index]]
-            one_config, one_result = self._evaluate_config(one_config)
+            for index, _ in init_configs.iterrows():
+                one_config = init_configs.iloc[[index]]
+                one_config, one_result = self._evaluate_config(one_config)
 
-            if self.observed_fvals.empty:
-                self.observed_fvals = one_result
-            else:
-                self.observed_fvals = pd.concat([self.observed_fvals, one_result], axis=0, ignore_index=True)
+                if self.observed_fvals.empty:
+                    self.observed_fvals = one_result
+                else:
+                    self.observed_fvals = pd.concat([self.observed_fvals, one_result], axis=0, ignore_index=True)
 
-            if self.observed_configs.empty:
-                self.observed_configs = one_config
-            else:
-                self.observed_configs = pd.concat([self.observed_configs, one_config], axis=0, ignore_index=True)
+                if self.observed_configs.empty:
+                    self.observed_configs = one_config
+                else:
+                    self.observed_configs = pd.concat([self.observed_configs, one_config], axis=0, ignore_index=True)
 
-        print(f'[Initialization] COMPLETED: {self.observed_fvals.shape[0]} points evaluated...')
+            print(f'[Initialization] COMPLETED: {self.observed_fvals.shape[0]} points evaluated...')
         end_time = time.time()
-
         time_taken = end_time - start_time
         return 0, time_taken
 
@@ -145,14 +168,16 @@ class LLAMBO:
         self.llm_query_cost.append(cost)
         self.llm_query_time.append(query_time)
 
+        # Use test_metric only if present (e.g. warm start may only have 'score')
+        gen_col = test_metric if test_metric in self.observed_fvals.columns else 'score'
         if self.lower_is_better:
             self.best_fval = self.observed_fvals['score'].min()
-            best_gen_fval = self.observed_fvals[test_metric].min()
+            best_gen_fval = self.observed_fvals[gen_col].min()
         else:
             self.best_fval = self.observed_fvals['score'].max()
-            best_gen_fval = self.observed_fvals[test_metric].max()
+            best_gen_fval = self.observed_fvals[gen_col].max()
 
-        print(f'[Initialization] COMPLETED: best fval: {self.best_fval:.4f}, best generalization fval: {best_gen_fval:.4f}')
+        print(f'[Initialization] COMPLETED: best fval: {self.best_fval:.4f}, best {gen_col}: {best_gen_fval:.4f}')
         print('='*150)
 
         # optimization loop
@@ -203,7 +228,7 @@ class LLAMBO:
             time_taken = end_time - start_time
 
             current_fval_cv = sel_candidate_fval['score'].values[0]
-            current_fval_gen = sel_candidate_fval[test_metric].values[0]
+            current_fval_gen = sel_candidate_fval[gen_col].values[0] if gen_col in sel_candidate_fval.columns else current_fval_cv
 
             if self.lower_is_better:
                 if current_fval_cv < self.best_fval:
@@ -219,9 +244,9 @@ class LLAMBO:
                     best_found = False
 
             if best_found:
-                print(f'[Trial {trial_id} completed, time taken: {time_taken:.2f}s] best fval (cv): {self.best_fval:.4f}, current fval (cv): {current_fval_cv:.4f}. Generalization fval: {current_fval_gen:.4f} NEW BEST FVAL FOUND!!')
+                print(f'[Trial {trial_id} completed, time taken: {time_taken:.2f}s] best fval (cv): {self.best_fval:.4f}, current fval (cv): {current_fval_cv:.4f}. {gen_col}: {current_fval_gen:.4f} NEW BEST FVAL FOUND!!')
             else: 
-                print(f'[Trial {trial_id} completed, time taken: {time_taken:.2f}s] best fval (cv): {self.best_fval:.4f}, current fval (cv): {current_fval_cv:.4f}. Generalization fval: {current_fval_gen:.4f}.')
+                print(f'[Trial {trial_id} completed, time taken: {time_taken:.2f}s] best fval (cv): {self.best_fval:.4f}, current fval (cv): {current_fval_cv:.4f}. {gen_col}: {current_fval_gen:.4f}.')
             print('='*150)
 
         # returns history of observed configurations and function values

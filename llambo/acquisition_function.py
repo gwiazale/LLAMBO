@@ -186,13 +186,10 @@ class LLM_ACQ:
             task_context = self.task_context
             model = task_context['model']
             task = task_context['task']
-            tot_feats = task_context['tot_feats']
-            cat_feats = task_context['cat_feats']
-            num_feats = task_context['num_feats']
-            n_classes = task_context['n_classes']
             metric = 'mean squared error' if task_context['metric'] == 'neg_mean_squared_error' else task_context['metric']
-            num_samples = task_context['num_samples']
             hyperparameter_constraints = task_context['hyperparameter_constraints']
+            dataset_type = task_context.get('dataset_type', 'tabular')
+            dataset_name = task_context.get('dataset_name', '')
             
             example_template = """
 Performance: {A}
@@ -205,13 +202,29 @@ Hyperparameter configuration: {Q}"""
 
             prefix = f"The following are examples of performance of a {model} measured in {metric} and the corresponding model hyperparameter configurations."
             if use_context == 'full_context':
-                if task == 'classification':
-                    prefix += f" The model is evaluated on a tabular {task} task containing {n_classes} classes."
-                elif task == 'regression':
-                    prefix += f" The model is evaluated on a tabular {task} task."
+                if dataset_type == 'image':
+                    # NAS-Bench-201 / image classification (e.g. CIFAR-10)
+                    ds_desc = {
+                        'cifar10': 'CIFAR-10 (32x32 RGB images, 10 classes)',
+                        'cifar100': 'CIFAR-100 (32x32 RGB images, 100 classes)',
+                        'ImageNet16-120': 'ImageNet16-120 (image classification, 120 classes)',
+                    }.get(dataset_name.lower() if isinstance(dataset_name, str) else '', 'image classification')
+                    n_classes = task_context.get('num_classes', 10)
+                    prefix += f" The model is evaluated on {ds_desc}. We are tuning the NAS-Bench-201 architecture index (which defines the cell structure) and training hyperparameters: learning rate, weight decay, batch size, optimizer (SGD/Adam/AdamW), and learning rate scheduler (cosine/multistep/exponential/none)."
                 else:
-                    raise Exception
-                prefix += f" The tabular dataset contains {num_samples} samples and {tot_feats} features ({cat_feats} categorical, {num_feats} numerical)."
+                    # Tabular benchmarks (Bayesmark)
+                    tot_feats = task_context['tot_feats']
+                    cat_feats = task_context['cat_feats']
+                    num_feats = task_context['num_feats']
+                    n_classes = task_context['n_classes']
+                    num_samples = task_context['num_samples']
+                    if task == 'classification':
+                        prefix += f" The model is evaluated on a tabular {task} task containing {n_classes} classes."
+                    elif task == 'regression':
+                        prefix += f" The model is evaluated on a tabular {task} task."
+                    else:
+                        raise Exception
+                    prefix += f" The tabular dataset contains {num_samples} samples and {tot_feats} features ({cat_feats} categorical, {num_feats} numerical)."
             prefix += f" The allowable ranges for the hyperparameters are:\n"
             for i, (hyperparameter, constraint) in enumerate(hyperparameter_constraints.items()):
                 if constraint[0] == 'float':
